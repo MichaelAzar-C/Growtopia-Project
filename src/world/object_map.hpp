@@ -20,8 +20,16 @@ public:
         bs.read(count);
         bs.read(drop_id_);
 
+        objects_.clear();
+        if (count > bs.remaining()) {
+            return; // Misread count: skip dropped items instead of crashing
+        }
+
         objects_.resize(count);
         for (auto& object : objects_) {
+            if (bs.remaining() == 0) {
+                break;
+            }
             object.serialize(bs, version);
         }
     }

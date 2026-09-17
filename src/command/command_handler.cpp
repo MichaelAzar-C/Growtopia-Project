@@ -1,5 +1,9 @@
 #include "command_handler.hpp"
 
+#include <cstdint>
+#include <cstring>
+#include <string>
+#include <tuple>
 #include <fmt/format.h>
 #include <spdlog/spdlog.h>
 
@@ -12,10 +16,17 @@
 #include "commands/proxy_command.hpp"
 #include "commands/skin_command.hpp"
 #include "commands/warp_command.hpp"
+#include "commands/ping_command.hpp"
+#include "commands/mass_action_command.hpp"
+#include "../packet/generic_packets.hpp"
+#include "../packet/game/world.hpp"
+#include "../packet/message/chat.hpp"
+#include "../utils/text_parse.hpp"
 
 namespace command {
 namespace {
     constexpr auto input_event_type = event::packet_event_type(packet::PacketId::Input);
+    constexpr auto spawn_event_type = event::packet_event_type(packet::PacketId::OnSpawn);
 }
 
 CommandHandler::CommandHandler(
@@ -39,12 +50,28 @@ CommandHandler::CommandHandler(
         [this](const event::Event& e) { on_text_packet(e); }
     );
 
+    // Catch the answer from the Quick Proxy Commands popup before it
+    // reaches the Growtopia server.
+    dialog_listener_handle_ = dispatcher_.prepend_listener(
+        event::Type::ServerBoundPacket,
+        [this](const event::Event& e) { on_raw_server_bound(e); }
+    );
+
+    // Extended zoom (always on): adjust our own spawn packet. Appended (normal priority)
+    // so the world handler still records the player first.
+    spawn_listener_handle_ = dispatcher_.append_listener(
+        spawn_event_type,
+        [this](const event::Event& e) { on_spawn(e); }
+    );
+
     spdlog::info("Command handler initialized with prefix '{}'", registry_.prefix());
 }
 
 CommandHandler::~CommandHandler()
 {
     dispatcher_.remove_listener(input_event_type, listener_handle_);
+    dispatcher_.remove_listener(event::Type::ServerBoundPacket, dialog_listener_handle_);
+    dispatcher_.remove_listener(spawn_event_type, spawn_listener_handle_);
 }
 
 void CommandHandler::register_default_commands()
@@ -56,6 +83,19 @@ void CommandHandler::register_default_commands()
     registry_.add(std::make_unique<SkinCommand>());
     registry_.add(std::make_unique<HelpCommand>());
     registry_.add(std::make_unique<DebugCommand>());
+
+    // Built-in mass actions (always enabled, listed in /phelp)
+    registry_.add(std::make_unique<MassActionCommand>(
+        "pullall", "Pull every player in the world at once", "pull"
+    ));
+    registry_.add(std::make_unique<MassActionCommand>(
+        "banall", "Ban every player in the world at once", "ban"
+    ));
+
+    // Quick commands (shown in /proxy with a tick box, hidden from /phelp)
+    registry_.add_quick(std::make_unique<PingCommand>(), true);
+
+
 }
 
 void CommandHandler::on_text_packet(const event::Event& e)
@@ -75,5 +115,114 @@ void CommandHandler::on_text_packet(const event::Event& e)
         spdlog::info("Command handler executed successfully");
         evt->cancel();
     }
+}
+
+void CommandHandler::on_raw_server_bound(const event::Event& e)
+{
+    const auto* raw = dynamic_cast<const event::RawPacketEvent*>(&e);
+    if (!raw || raw->data.size() <= sizeof(std::uint32_t)) {
+        return;
+    }
+
+    // Only text messages can be a dialog answer
+    std::uint32_t message_type{};
+    std::memcpy(&message_type, raw->data.data(), sizeof(message_type));
+    if (
+        message_type != packet::NET_MESSAGE_GENERIC_TEXT &&
+        message_type != packet::NET_MESSAGE_GAME_MESSAGE
+    ) {
+        return;
+    }
+
+    std::string text{
+        reinterpret_cast<const char*>(raw->data.data()) + sizeof(message_type),
+        raw->data.size() - sizeof(message_type)
+    };
+    while (!text.empty() && (text.back() == '\0' || text.back() == '\n' || text.back() == '\r')) {
+        text.pop_back();
+    }
+
+    if (text.find("dialog_return") == std::string::npos) {
+        return;
+    }
+
+    const utils::TextParse parse{ text };
+    if (
+        parse.get("action") != "dialog_return" ||
+        parse.get("dialog_name") != QUICK_PROXY_DIALOG
+    ) {
+        return; // A real Growtopia popup: let it through
+    }
+
+    // This answer belongs to our popup, so the server must never see it
+    e.cancel();
+
+    std::size_t changed{ 0 };
+    for (const auto& info : registry_.get_quick_commands()) {
+        const std::string value{
+            parse.get(fmt::format("{}{}", QUICK_CHECKBOX_PREFIX, info.name))
+        };
+        if (value.empty()) {
+            continue;
+        }
+
+        const bool enabled{ value.front() == '1' };
+        if (enabled != info.enabled) {
+            registry_.set_enabled(info.name, enabled);
+            ++changed;
+        }
+
+        spdlog::info("Quick command '{}' is now {}", info.name, enabled ? "enabled" : "disabled");
+    }
+
+    packet::message::Log log{};
+    log.msg = fmt::format("`2Quick commands saved ``({} changed)", changed);
+    std::ignore = packet::PacketHelper::write(log, server_);
+}
+
+void CommandHandler::on_spawn(const event::Event& e)
+{
+    // Extended zoom is always on: Growtopia gives moderators a wider zoom
+    // range, and reads that from the "mstate" line of YOUR spawn packet.
+    // We set it to 1 for the local player only. Nothing goes to the server.
+    const auto* evt = dynamic_cast<const event::TypedPacketEvent<packet::PacketId::OnSpawn>*>(&e);
+    if (!evt || evt->direction != event::Direction::ClientBound) {
+        return;
+    }
+
+    const auto pkt{ evt->get<packet::game::OnSpawn>() };
+    if (!pkt || pkt->type != "local" || pkt->variant.size() < 2) {
+        return; // Only change OUR player, never other players
+    }
+
+    // Edit only the "mstate" line of the original text, keeping every
+    // other line exactly as the server sent it.
+    std::string text{ pkt->variant.get<std::string>(1) };
+    const auto line_start{ text.find("mstate|") };
+    if (line_start != std::string::npos && (line_start == 0 || text[line_start - 1] == '\n')) {
+        const auto value_start{ line_start + std::string_view{ "mstate|" }.size() };
+        const auto line_end{ text.find('\n', value_start) };
+        text.replace(
+            value_start,
+            (line_end == std::string::npos ? text.size() : line_end) - value_start,
+            "1"
+        );
+    }
+    else {
+        if (!text.empty() && text.back() != '\n') {
+            text += '\n';
+        }
+        text += "mstate|1\n";
+    }
+
+    packet::GenericVariantPacket modified{};
+    modified.game_packet = pkt->game_packet;
+    modified.variant = pkt->variant;
+    modified.variant.set(1, text);
+
+    // Send our edited copy to the game instead of the original
+    e.cancel();
+    std::ignore = packet::PacketHelper::write(modified, server_);
+    spdlog::info("Extended zoom applied to local player");
 }
 }

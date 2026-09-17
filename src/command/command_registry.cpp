@@ -1,14 +1,78 @@
 #include "command_registry.hpp"
 
+#include <algorithm>
 #include <iterator>
+#include <tuple>
 #include <sstream>
+#include <fmt/format.h>
 #include <spdlog/spdlog.h>
+
+#include "../packet/packet_helper.hpp"
+#include "../packet/message/chat.hpp"
 
 namespace command {
 void CommandRegistry::add(std::unique_ptr<ICommand> cmd)
 {
     std::string key{ cmd->name() };
     commands_[std::move(key)] = std::move(cmd);
+}
+
+void CommandRegistry::add_quick(std::unique_ptr<ICommand> cmd, const bool enabled)
+{
+    std::string key{ cmd->name() };
+    quick_commands_[key] = enabled;
+    add(std::move(cmd));
+}
+
+void CommandRegistry::add_hidden(std::unique_ptr<ICommand> cmd)
+{
+    hidden_commands_.insert(std::string{ cmd->name() });
+    add(std::move(cmd));
+}
+
+bool CommandRegistry::is_hidden(std::string_view name) const
+{
+    return hidden_commands_.contains(std::string(name));
+}
+
+bool CommandRegistry::is_quick(std::string_view name) const
+{
+    return quick_commands_.contains(std::string(name));
+}
+
+bool CommandRegistry::is_enabled(std::string_view name) const
+{
+    if (const auto it = quick_commands_.find(std::string(name)); it != quick_commands_.end()) {
+        return it->second;
+    }
+
+    // Normal (non-quick) commands are always enabled
+    return true;
+}
+
+void CommandRegistry::set_enabled(std::string_view name, const bool enabled)
+{
+    if (const auto it = quick_commands_.find(std::string(name)); it != quick_commands_.end()) {
+        it->second = enabled;
+    }
+}
+
+std::vector<QuickCommandInfo> CommandRegistry::get_quick_commands() const
+{
+    std::vector<QuickCommandInfo> result;
+    result.reserve(quick_commands_.size());
+
+    for (const auto& [name, enabled] : quick_commands_) {
+        if (const auto* cmd = get(name)) {
+            result.push_back({ name, cmd->description(), enabled });
+        }
+    }
+
+    std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) {
+        return a.name < b.name;
+    });
+
+    return result;
 }
 
 ICommand* CommandRegistry::get(std::string_view name) const
@@ -53,6 +117,14 @@ bool CommandRegistry::execute(
     auto* cmd = get(name);
     if (!cmd) {
         return false;
+    }
+
+    // A quick command that was switched off in the /proxy popup
+    if (!is_enabled(name)) {
+        packet::message::Log log{};
+        log.msg = fmt::format("`4{}{} is disabled. ``Enable it in {}proxy", prefix_, name, prefix_);
+        std::ignore = packet::PacketHelper::write(log, server);
+        return true;
     }
 
     const Context ctx{

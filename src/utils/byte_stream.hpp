@@ -3,6 +3,7 @@
 #include <string>
 #include <span>
 #include <cstring>
+#include <algorithm>
 
 namespace utils {
 template <typename LengthType = std::uint16_t>
@@ -73,7 +74,7 @@ public:
 
     bool read_data(void* ptr, const std::size_t size)
     {
-        if (get_size() - read_offset_ < size) {
+        if (size > remaining()) {
             return false;
         }
 
@@ -90,7 +91,7 @@ public:
             }
         }
 
-        if (get_size() - read_offset_ < static_cast<std::size_t>(length)) {
+        if (static_cast<std::size_t>(length) > remaining()) {
             return false;
         }
 
@@ -112,7 +113,7 @@ public:
             }
         }
 
-        if (get_size() - read_offset_ < static_cast<std::size_t>(length)) {
+        if (static_cast<std::size_t>(length) > remaining()) {
             return false;
         }
 
@@ -127,8 +128,17 @@ public:
         return *this;
     }
 
-    void backtrack(const std::size_t size) { read_offset_ -= size; }
-    void skip(const std::size_t size) { read_offset_ += size; }
+    // Never move the read position outside the data. Before this, a bad
+    // skip() could push it past the end, and the size checks above would
+    // then wrap around and let reads run into invalid memory (a crash).
+    void backtrack(const std::size_t size) { read_offset_ -= std::min(size, read_offset_); }
+    void skip(const std::size_t size) { read_offset_ = std::min(read_offset_ + size, get_size()); }
+
+    // How many bytes are left to read
+    [[nodiscard]] std::size_t remaining() const
+    {
+        return read_offset_ >= get_size() ? 0 : get_size() - read_offset_;
+    }
     [[nodiscard]] std::size_t get_read_offset() const { return read_offset_; }
     
     [[nodiscard]] std::size_t get_size() const

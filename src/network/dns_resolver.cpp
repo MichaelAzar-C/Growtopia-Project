@@ -49,6 +49,7 @@ DnsResult DnsResolver::resolve_domain(const std::string& domain) const
     cli.set_connection_timeout(5);
     cli.set_read_timeout(10);
     cli.set_write_timeout(5);
+    cli.set_ca_cert_path("./resources/cacert.pem");
 
     httplib::Result res{ cli.Get(
         fmt::format("{}?name={}&type=A", provider_->get_path(), domain),

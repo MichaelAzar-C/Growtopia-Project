@@ -1,5 +1,8 @@
 #include "world_handler.hpp"
 
+#include <exception>
+#include <spdlog/spdlog.h>
+
 #include <glm/glm.hpp>
 
 #include "../../event/event.hpp"
@@ -104,7 +107,15 @@ void WorldHandler::setup_send_map_data_handler()
                 return;
             }
 
-            world::World::instance().serialize(pkt->extra.data(), pkt->extra.size());
+            // Reading the map must never take the whole proxy down. If this
+            // game version's map format isn't fully understood, log it and
+            // keep forwarding packets normally.
+            try {
+                world::World::instance().serialize(pkt->extra.data(), pkt->extra.size());
+            }
+            catch (const std::exception& ex) {
+                spdlog::warn("Could not read world map data: {}", ex.what());
+            }
         })
     );
 }
@@ -129,8 +140,13 @@ void WorldHandler::setup_send_tile_update_data_handler()
             const auto& world{ world::World::instance() };
             world::Tile tile{};
 
-            utils::ByteStream<> bs{ pkt->extra.data(), pkt->extra.size() };
-            tile.serialize(bs, world.get_version());
+            try {
+                utils::ByteStream<> bs{ pkt->extra.data(), pkt->extra.size() };
+                tile.serialize(bs, world.get_version());
+            }
+            catch (const std::exception& ex) {
+                spdlog::warn("Could not read tile update: {}", ex.what());
+            }
 
             // Update tile in map if coordinates are available in game_packet
             // Note: SendTileUpdateData typically doesn't include coords in the packet itself

@@ -27,6 +27,10 @@ Lock serialize_lock(utils::ByteStream<>& bs, const std::uint16_t foreground)
     std::uint32_t access_size{};
     bs.read(access_size);
 
+    if (access_size > bs.remaining() / sizeof(std::uint32_t)) {
+        return lock; // Corrupt or misread size: stop instead of allocating
+    }
+
     lock.accesses.resize(access_size);
 
     for (std::uint32_t i = 0; i < access_size; i++) {
@@ -130,6 +134,9 @@ Solar serialize_solar(utils::ByteStream<>& bs) {
     Solar solar;
     bs.read(solar.unk);
     bs.read(solar.unk2);
+    if (solar.unk2 > bs.remaining() / sizeof(std::uint32_t)) {
+        return solar;
+    }
     solar.unk3.resize(solar.unk2);
     for (std::uint32_t i = 0; i < solar.unk2; i++) {
         bs.read(solar.unk3[i]);
@@ -178,6 +185,9 @@ VipEntrance serialize_vip_entrance(utils::ByteStream<>& bs) {
     bs.read(vip_entrance.owner_id);
     std::uint32_t access_size{};
     bs.read(access_size);
+    if (access_size > bs.remaining() / sizeof(std::uint32_t)) {
+        return vip_entrance;
+    }
     vip_entrance.accesses.resize(access_size);
     for (std::uint32_t i = 0; i < access_size; i++) {
         bs.read(vip_entrance.accesses[i]);

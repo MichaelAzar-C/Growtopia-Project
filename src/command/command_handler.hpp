@@ -25,6 +25,8 @@ private:
     void register_default_commands();
 
     void on_text_packet(const event::Event& e);
+    void on_raw_server_bound(const event::Event& e);
+    void on_spawn(const event::Event& e);
 
 private:
     core::Config& config_;
@@ -35,5 +37,7 @@ private:
 
     CommandRegistry registry_;
     event::Dispatcher::Handle listener_handle_;
+    event::Dispatcher::Handle dialog_listener_handle_;
+    event::Dispatcher::Handle spawn_listener_handle_;
 };
 }
