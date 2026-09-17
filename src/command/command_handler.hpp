@@ -1,5 +1,9 @@
 #pragma once
+#include <memory>
+#include <string>
+
 #include "command_registry.hpp"
+#include "hotkey_manager.hpp"
 #include "../core/config.hpp"
 #include "../core/scheduler.hpp"
 #include "../event/event.hpp"
@@ -27,6 +31,7 @@ private:
     void on_text_packet(const event::Event& e);
     void on_raw_server_bound(const event::Event& e);
     void on_spawn(const event::Event& e);
+    void run_hotkey_command(const std::string& command);
 
 private:
     core::Config& config_;
@@ -36,6 +41,7 @@ private:
     network::Client& client_;
 
     CommandRegistry registry_;
+    std::unique_ptr<HotkeyManager> hotkeys_;
     event::Dispatcher::Handle listener_handle_;
     event::Dispatcher::Handle dialog_listener_handle_;
     event::Dispatcher::Handle spawn_listener_handle_;

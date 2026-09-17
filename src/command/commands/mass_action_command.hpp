@@ -12,7 +12,7 @@
 #include "../command.hpp"
 #include "../command_registry.hpp"
 #include "../../packet/packet_helper.hpp"
-#include "../../packet/message/input.hpp"
+#include "../../packet/chat_packet.hpp"
 #include "../../world/world.hpp"
 
 namespace command {
@@ -75,9 +75,7 @@ public:
                         return;
                     }
 
-                    packet::message::Input input{};
-                    input.text = chat_text;
-                    std::ignore = packet::PacketHelper::write(input, *client);
+                    std::ignore = client->write(packet::build_chat_packet(chat_text));
                     spdlog::info("Sent: {}", chat_text);
                 },
                 DELAY_BETWEEN_PLAYERS * static_cast<std::int64_t>(i),

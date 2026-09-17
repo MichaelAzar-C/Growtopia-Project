@@ -1,5 +1,6 @@
 #include "command_handler.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -18,6 +19,8 @@
 #include "commands/warp_command.hpp"
 #include "commands/ping_command.hpp"
 #include "commands/mass_action_command.hpp"
+#include "commands/hotkeys_command.hpp"
+#include "../packet/chat_packet.hpp"
 #include "../packet/generic_packets.hpp"
 #include "../packet/game/world.hpp"
 #include "../packet/message/chat.hpp"
@@ -43,6 +46,17 @@ CommandHandler::CommandHandler(
     , client_{ client }
 {
     registry_.set_prefix(config_.get_command_config().prefix);
+    // Hotkeys: load saved keys and start listening. Commands run on the
+    // scheduler so the keyboard listener is never slowed down.
+    hotkeys_ = std::make_unique<HotkeyManager>([this](const std::string& command) {
+        scheduler_->schedule_delayed(
+            [this, command] { run_hotkey_command(command); },
+            std::chrono::milliseconds{ 0 },
+            "hotkey",
+            core::TaskPriority::Normal
+        );
+    });
+
     register_default_commands();
 
     listener_handle_ = dispatcher_.prepend_listener(
@@ -69,6 +83,10 @@ CommandHandler::CommandHandler(
 
 CommandHandler::~CommandHandler()
 {
+    // Stop the keyboard listener first so no new hotkey tasks are queued
+    hotkeys_.reset();
+    scheduler_->cancel_by_tag("hotkey");
+
     dispatcher_.remove_listener(input_event_type, listener_handle_);
     dispatcher_.remove_listener(event::Type::ServerBoundPacket, dialog_listener_handle_);
     dispatcher_.remove_listener(spawn_event_type, spawn_listener_handle_);
@@ -91,6 +109,7 @@ void CommandHandler::register_default_commands()
     registry_.add(std::make_unique<MassActionCommand>(
         "banall", "Ban every player in the world at once", "ban"
     ));
+    registry_.add(std::make_unique<HotkeysCommand>(*hotkeys_));
 
     // Quick commands (shown in /proxy with a tick box, hidden from /phelp)
     registry_.add_quick(std::make_unique<PingCommand>(), true);
@@ -147,10 +166,25 @@ void CommandHandler::on_raw_server_bound(const event::Event& e)
     }
 
     const utils::TextParse parse{ text };
-    if (
-        parse.get("action") != "dialog_return" ||
-        parse.get("dialog_name") != QUICK_PROXY_DIALOG
-    ) {
+    if (parse.get("action") != "dialog_return") {
+        return;
+    }
+
+    // ---- /hotkeys popup ----
+    if (parse.get("dialog_name") == HOTKEYS_DIALOG) {
+        e.cancel(); // our popup: the server must never see this
+
+        HotkeyManager::Slots slots{};
+        for (std::size_t i = 0; i < slots.size(); ++i) {
+            slots[i].command = parse.get(fmt::format("{}{}", HOTKEY_COMMAND_FIELD, i + 1));
+            slots[i].key = parse.get(fmt::format("{}{}", HOTKEY_KEY_FIELD, i + 1));
+        }
+        hotkeys_->set_slots(slots);
+        spdlog::info("Hotkeys saved");
+        return;
+    }
+
+    if (parse.get("dialog_name") != QUICK_PROXY_DIALOG) {
         return; // A real Growtopia popup: let it through
     }
 
@@ -224,5 +258,20 @@ void CommandHandler::on_spawn(const event::Event& e)
     e.cancel();
     std::ignore = packet::PacketHelper::write(modified, server_);
     spdlog::info("Extended zoom applied to local player");
+}
+
+void CommandHandler::run_hotkey_command(const std::string& command)
+{
+    if (command.empty() || !client_.is_connected()) {
+        return;
+    }
+
+    // Proxy commands (like /pullall) run inside the proxy
+    if (registry_.execute(command, server_, client_, dispatcher_, scheduler_)) {
+        return;
+    }
+
+    // Anything else (like /warp START or normal chat) goes to the server
+    std::ignore = client_.write(packet::build_chat_packet(command));
 }
 }
